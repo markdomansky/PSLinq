@@ -1,0 +1,10 @@
+group,id,data,g1
+1,a,ABC,eq
+2,b,DEF,eq
+3,c,GHI,eq
+4,d,JKL,onlyA
+5,e,MNO,eq
+6,f,PQR,diff_ID_Data
+7,g,DKD,diff_Data
+8,h,VWX,eq
+9,i,yz,eq-CaseSensitive

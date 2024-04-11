@@ -9,14 +9,20 @@ Detailed description of the script and what it is for.
 Compare-CollectionsLinq.ps1 -param1 "Value"
 Give an example of common usage.  Repeat EXAMPLE as desired
 
-.PARAMETER CollectionA
+.PARAMETER Collection1
 Required.  A Collection of objects to compare.  This is the first collection to compare.
 
-.PARAMETER CollectionB
+.PARAMETER Collection2
 Required.  A Collection of objects to compare.  This is the second collection to compare.
 
 .PARAMETER Properties
-Required.  An array of properties in the objects to compare.
+Optional.  An array of properties in the objects to compare.  If not specified, will detect all noteproperties.
+
+.PARAMETER Collection1Name
+Optional.  A name for the first collection.  Default is Col1.
+
+.PARAMETER Collection2Name
+Optional.  A name for the second collection.  Default is Col2.
 
 .PARAMETER CaseSensitive
 Optional.  A switch to indicate if the comparison should be case sensitive.  Default is false.
@@ -26,7 +32,7 @@ Author:           @markdomansky
 Creation Date:    2022-02-22 10:18
 History:
     2022-02-22 10:18, 1.0, @markdomansky, Initial Creation
-
+    2024-04-09, 1.1, @markdomansky, Removed Mandatory
 
 This template is CC0/1.0 Public Domain and can be found at github.com/markdomansky/PSScriptTemplate
 #NOTE This comment block MUST come before everything else (except a function definition).
@@ -53,18 +59,30 @@ param
 (
     #Parameter Templates are at the bottom of the script
 
-    [Parameter(Position = 0, Mandatory)]
-    [Alias('A', 'ColA', 'Collection1')]
-    [Object[]]$CollectionA,
+    [Parameter(Position = 0)]
+    [Alias('A', 'ColA', 'CollectionA', 'Col1', '1')]
+    [Object[]]$Collection1,
 
-    [Parameter(Position = 1, Mandatory)]
-    [Alias('B', 'ColB', 'Collection2')]
-    [Object[]]$CollectionB,
+    [Parameter(Position = 1)]
+    [Alias('B', 'ColB', 'CollectionB', 'Col2', '2')]
+    [Object[]]$Collection2,
 
-    [Parameter(Position = 2, Mandatory)]
+    [Parameter(Position = 2)]
     [Alias('Properties')]
     [ValidateNotNullOrEmpty()]
     [String[]]$Property,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[a-zA-Z]{1,10}$')]
+    [Alias('1Name', 'Col1Name', 'AName', 'ColAName')]
+    [string]$Collection1Name = 'Col1',
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[a-zA-Z]{1,10}$')]
+    [Alias('2Name', 'Col2Name', 'BName', 'ColBName')]
+    [string]$Collection2Name = 'Col2',
 
     [Parameter()]
     [Switch]$CaseSensitive
@@ -77,11 +95,18 @@ begin
     #$ErrorActionPreference = "Stop" #Stop, *Continue*, SilentlyContinue
     #$VerboseActionPreference = "Continue" #Stop, Continue, *SilentlyContinue*
 
+    if ($Collection1Name -eq $Collection2Name) {
+        throw "Collection names (-Collection1Name/-COllection2Name) cannot be the same."
+    }
+
     function BuildPropertyComparer
     {
         param (
             [Parameter(Mandatory)]
             [string[]]$Property,
+
+            [Parameter(Mandatory)]
+            [string]$Name,
 
             [Parameter()]
             [switch]$CaseSensitive
@@ -89,7 +114,7 @@ begin
         #Build a string to calculate the hashcode of multiple properties of an object
         #This is a simple XOR of the hashcodes of each of the properties
         #This is a more complex example that is not used here, but left for reference
-        write-verbose "Building Property Comparer for $($Property -join ', ')"
+        Write-Verbose "Building Property Comparer for $($Property -join ', ')"
 
 
         #the apostrophes on the properties allows support for props with spaces
@@ -125,8 +150,9 @@ begin
         $HashIDs = $property | ForEach-Object { "`$hash$_" }
         $HashStr = 'return [int]({0});' -f ($HashIDs -join ' -bxor ')
 
+        #We use a unique name for the class to avoid conflicts when doing multiple comparisons.  These will exist until the session is closed.
         $cls = @"
-class CustomComparer:Collections.Generic.IEqualityComparer[System.object]
+class $($name):Collections.Generic.IEqualityComparer[System.object]
 {
     [bool]Equals([System.object]`$x, [System.object]`$y)
     {
@@ -153,7 +179,7 @@ $($HashCalcs  -join "`n`n")
     }
 }
 "@
-        write-output $cls
+        Write-Output $cls
     }
 
 } #/begin
@@ -163,12 +189,20 @@ process
     #$PSBoundParameters.containskey('') to determine if value was specified for parameter
     #switch ($pscmdlet.parametersetname) {"Group1" {} "Group2" {} }
 
+    if (-not $property)
+    {
+        [string[]]$prop1 = $collection1 | Get-Member -MemberType NoteProperty | Select-Object -expand name
+        [string[]]$prop2 = $collection2 | Get-Member -MemberType NoteProperty | Select-Object -expand name
+        [string[]]$property = [Linq.Enumerable]::Intersect($prop1, $prop2)
+    }
+
     if ($property)
     {
-        $comparerStr = BuildPropertyComparer -Property $property -CaseSensitive:$CaseSensitive
+        $ComparerName = 'CustomComparer{0}' -f (New-Guid).ToString().Replace('-', '')
+        $comparerStr = BuildPropertyComparer -Property $property -Name $comparerName -CaseSensitive:$CaseSensitive
         Write-Verbose $comparerStr
         Invoke-Expression $comparerStr
-        $comparer = [CustomComparer]::new()
+        $comparer = New-Object $comparername
     }
     else
     {
@@ -178,23 +212,57 @@ process
     # $toIEnumerable = [Linq.Enumerable].GetMethod('Cast').MakeGenericMethod([System.Object])
     # $cA = $toIEnumerable.Invoke($null, (, $CollectionA))
     # $cB = $toIEnumerable.Invoke($null, (, $CollectionB))
+    if ($null -eq $Collection1 -or $null -eq $Collection2)
+    {
+        #One of the arrays is null, so, by definition, both arrays fit into DiffA/DiffB
+        [System.Collections.Generic.List[System.Object]]$Diff1 = $Collection1
+        [System.Collections.Generic.List[System.Object]]$Diff2 = $Collection2
+        [System.Collections.Generic.List[System.Object]]$Equal1 = $null
+        [System.Collections.Generic.List[System.Object]]$Equal2 = $null
+    }
+    else
+    {
+        [System.Collections.Generic.List[System.Object]]$Diff1 = [Linq.Enumerable]::Except($Collection1, $Collection2, $comparer)
+        [System.Collections.Generic.List[System.Object]]$Diff2 = [Linq.Enumerable]::Except($Collection2, $Collection1, $comparer)
+        [System.Collections.Generic.List[System.Object]]$Equal1 = [Linq.Enumerable]::Intersect($Collection1, $Collection2, $comparer)
+        [System.Collections.Generic.List[System.Object]]$Equal2 = [Linq.Enumerable]::Intersect($Collection2, $Collection1, $comparer)
+    }
 
     $returndata = [pscustomobject] @{
-        OnlyA  = [System.Collections.Generic.List[System.Object]]::new(([Linq.Enumerable]::Except($collectionA, $collectionB, $comparer)))
-        OnlyB  = [System.Collections.Generic.List[System.Object]]::new(([Linq.Enumerable]::Except($collectionB, $collectionA, $comparer)))
+        Diff1  = $Diff1
+        Diff2  = $Diff2
         #This returns the objects from array1 that are equal, necessary because they might have properties we didn't test
-        EqualA = [System.Collections.Generic.List[System.Object]]::new(([Linq.Enumerable]::Intersect($collectionA, $collectionB, $comparer)))
-        EqualB = [System.Collections.Generic.List[System.Object]]::new(([Linq.Enumerable]::Intersect($collectionB, $collectionA, $comparer)))
+        Equal1 = $Equal1
+        Equal2 = $Equal2
         #We include the properties tested with the object, so that the user can see what was tested
-        Tested = $property
+        Compared = $property
     }
-    #This one Equal property returns only the properties tested with
-    $returndata | Add-Member -Name 'Equal' -MemberType ScriptProperty -Value { $this.EqualA | Select-Object $this.tested }
-    #These are for backwards compatibility
-    $returndata | Add-Member -Name 'OnlyColA' -MemberType ScriptProperty -Value { $this.OnlyA }
-    $returndata | Add-Member -Name 'OnlyColB' -MemberType ScriptProperty -Value { $this.OnlyB }
 
-    $defaultDisplaySet = 'Equal', 'OnlyA', 'OnlyB'
+    #This one Equal property returns only the properties tested with
+    $returndata | Add-Member -Name 'Equal' -MemberType ScriptProperty -Value { $this.Equal1 | Select-Object $this.Compared }
+
+
+    if ($Collection1Name)
+    {
+        $returndata | Add-Member -Name "Diff_$Collection1Name" -MemberType ScriptProperty -Value { $this.Diff1 }
+        $returndata | Add-Member -Name "Equal_$Collection1Name" -MemberType ScriptProperty -Value { $this.Equal1 }
+    }
+    if ($Collection2Name)
+    {
+        $returndata | Add-Member -Name "Diff_$Collection2Name" -MemberType ScriptProperty -Value { $this.Diff2 }
+        $returndata | Add-Member -Name "Equal_$Collection2Name" -MemberType ScriptProperty -Value { $this.Equal2 }
+    }
+
+    $sb = @"
+    `$this | Select-Object -Property @(
+        @{Name = 'Equal'; Expression = { `$this.Equal1.Count } },
+        @{Name = "Diff_$Collection1Name"; Expression = { `$this.Diff1.Count } },
+        @{Name = "Diff_$Collection2Name"; Expression = { `$this.Diff2.Count } }
+        )
+"@
+    $returndata | Add-Member -Name 'Summary' -MemberType scriptproperty -Value ([scriptblock]::create($sb))
+
+    $defaultDisplaySet = 'Summary', 'Compared', 'Equal', "Diff_$Collection1Name", "Diff_$Collection2Name", "Equal_$Collection1Name", "Equal_$Collection2Name"
     $defaultDisplayPropertySet = New-Object System.Management.Automation.PSPropertySet('DefaultDisplayPropertySet', [string[]]$defaultDisplaySet)
     $PSStandardMembers = [System.Management.Automation.PSMemberInfo[]]@($defaultDisplayPropertySet)
     $returndata | Add-Member MemberSet PSStandardMembers $PSStandardMembers
